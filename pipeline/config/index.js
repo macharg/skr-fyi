@@ -28,7 +28,7 @@ export const KNOWN_TOKENS = {
   BONK: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
   RAY: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
   // SKR mint — verify this on-chain, placeholder below
-  SKR: "SKRbvoCFESqKTv5i3VYcDWtRA7NgrPYskmcLE4ZhW3",
+  SKR: "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3",
 };
 
 // Known DeFi program IDs for categorizing transactions

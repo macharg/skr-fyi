@@ -29,4 +29,4 @@ COPY cron/schedule /etc/cron.d/skr-fyi
 RUN chmod 0644 /etc/cron.d/skr-fyi && crontab /etc/cron.d/skr-fyi
 
 # Default: run full pipeline once, then start cron
-CMD ["sh", "-c", "node scripts/01-discover-sgt-wallets.js && node scripts/02-daily-snapshot.js && node scripts/03-activity-scanner.js && node scripts/04-aggregate.js && cron -f"]
+CMD ["node", "scripts/test-connection.js"]
