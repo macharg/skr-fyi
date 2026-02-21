@@ -1,0 +1,18 @@
+{
+  "name": "skr-fyi-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "init-db": "node scripts/init-db.js",
+    "discover": "node scripts/01-discover-sgt-wallets.js",
+    "snapshot": "node scripts/02-daily-snapshot.js",
+    "activity": "node scripts/03-activity-scanner.js",
+    "aggregate": "node scripts/04-aggregate.js",
+    "full-run": "npm run discover && npm run snapshot && npm run activity && npm run aggregate"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.0"
+  }
+}

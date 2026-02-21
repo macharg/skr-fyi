@@ -1,0 +1,27 @@
+{
+  "name": "skr-fyi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Solana Seeker ecosystem analytics dashboard",
+  "workspaces": ["app", "pipeline"],
+  "scripts": {
+    "dev": "npm run dev --workspace=app",
+    "build": "npm run build --workspace=app",
+    "start": "npm run start --workspace=app",
+    "pipeline:init": "npm run init-db --workspace=pipeline",
+    "pipeline:discover": "npm run discover --workspace=pipeline",
+    "pipeline:snapshot": "npm run snapshot --workspace=pipeline",
+    "pipeline:activity": "npm run activity --workspace=pipeline",
+    "pipeline:aggregate": "npm run aggregate --workspace=pipeline",
+    "pipeline:full": "npm run full-run --workspace=pipeline",
+    "lint": "npm run lint --workspace=app"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/skr-fyi"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

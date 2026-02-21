@@ -1,0 +1,43 @@
+# ─── Dependencies ─────────────────────────────
+node_modules/
+
+# ─── Environment & Secrets ────────────────────
+.env
+.env.local
+.env.production
+.env*.local
+
+# ─── Database ─────────────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+pipeline/data/*.db*
+
+# ─── Build output ─────────────────────────────
+app/.next/
+app/out/
+dist/
+
+# ─── Pipeline output (generated, not committed)
+# dashboard.json IS committed so frontend works without pipeline
+# pipeline/data/  <-- keep the generated JSON, ignore the DB
+pipeline/data/*.db*
+pipeline/logs/
+
+# ─── Vercel ───────────────────────────────────
+.vercel
+
+# ─── OS ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ──────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── Misc ─────────────────────────────────────
+*.log
+*.tgz

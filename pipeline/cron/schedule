@@ -1,0 +1,16 @@
+# Seeker Pulse Pipeline — Cron Schedule
+# ─────────────────────────────────────────────────────────
+
+# Discover new SGT wallets — daily at 2:00 AM UTC
+0 2 * * * cd /app && node scripts/01-discover-sgt-wallets.js >> /app/logs/discover.log 2>&1
+
+# Snapshot holdings & balances — daily at 3:00 AM UTC
+0 3 * * * cd /app && node scripts/02-daily-snapshot.js >> /app/logs/snapshot.log 2>&1
+
+# Activity scanner — every 2 hours
+0 */2 * * * cd /app && node scripts/03-activity-scanner.js >> /app/logs/activity.log 2>&1
+
+# Aggregate dashboard JSON — every 2 hours (15 min after activity scan)
+15 */2 * * * cd /app && node scripts/04-aggregate.js >> /app/logs/aggregate.log 2>&1
+
+# Keep an empty line at the end (required by cron)
