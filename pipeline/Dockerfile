@@ -2,6 +2,7 @@
 FROM node:20-slim
 
 WORKDIR /app
+ARG CACHEBUST=2
 
 # force rebuild 1
 
@@ -12,7 +13,7 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
-# Copy application code
+# Copy application code v2
 COPY config/ ./config/
 COPY scripts/ ./scripts/
 COPY cron/ ./cron/
