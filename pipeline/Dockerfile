@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 
 # Copy package files and install dependencies
 COPY package.json package-lock.json* ./
-RUN npm ci --production
+RUN npm install --omit=dev
 
 # Copy application code
 COPY config/ ./config/
