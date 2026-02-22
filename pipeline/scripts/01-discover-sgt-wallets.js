@@ -49,9 +49,6 @@ async function getAllMintSignatures() {
   log("Step 1: Fetching mint authority transaction signatures...");
 
   // Check if we have a cursor from a previous run
-  const lastSig = db.prepare(
-    `SELECT value FROM pipeline_state WHERE key = 'last_mint_sig'`
-  ).get();
 
   // Create state table if needed
   db.exec(`
@@ -300,7 +297,7 @@ async function main() {
 
     if (signatures.length === 0) {
       log("No new transactions found. Database is up to date.", "success");
-      db.prepare(`UPDATE pipeline_runs SET status = 'success', ended_at = datetime('now') WHERE id = ?`).run(runId);
+      db.prepare(`UPDATE pipeline_runs SET status = 'success', finished_at = datetime('now') WHERE id = ?`).run(runId);
       db.close();
       return;
     }
@@ -310,7 +307,7 @@ async function main() {
 
     if (sgtMints.size === 0) {
       log("No SGT mints found in transactions.", "warn");
-      db.prepare(`UPDATE pipeline_runs SET status = 'success', ended_at = datetime('now') WHERE id = ?`).run(runId);
+      db.prepare(`UPDATE pipeline_runs SET status = 'success', finished_at = datetime('now') WHERE id = ?`).run(runId);
       db.close();
       return;
     }
@@ -322,12 +319,12 @@ async function main() {
     const totalWallets = saveWallets(wallets);
 
     // Done
-    db.prepare(`UPDATE pipeline_runs SET status = 'success', ended_at = datetime('now') WHERE id = ?`).run(runId);
+    db.prepare(`UPDATE pipeline_runs SET status = 'success', finished_at = datetime('now') WHERE id = ?`).run(runId);
     log(`Discovery complete! ${totalWallets} total Seeker wallets in database.`, "success");
   } catch (e) {
     log(`Fatal error: ${e.message}`, "error");
     console.error(e.stack);
-    db.prepare(`UPDATE pipeline_runs SET status = 'error', ended_at = datetime('now') WHERE id = ?`).run(runId);
+    db.prepare(`UPDATE pipeline_runs SET status = 'error', finished_at = datetime('now') WHERE id = ?`).run(runId);
   } finally {
     db.close();
   }
