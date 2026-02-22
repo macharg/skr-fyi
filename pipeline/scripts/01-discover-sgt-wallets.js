@@ -14,6 +14,8 @@
 // On subsequent runs: scans only new transactions since last run
 // ─────────────────────────────────────────────────────────────────────────────
 
+console.log("=== DISCOVERY SCRIPT v2 STARTING ===");
+
 import Database from "better-sqlite3";
 import {
   DB_PATH, SGT, HELIUS_RPC_URL, HELIUS_API_KEY, HELIUS_API_URL,
