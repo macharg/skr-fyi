@@ -15,12 +15,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 console.log("=== DISCOVERY SCRIPT v2 STARTING ===");
-
+import { execSync } from "child_process";
 import Database from "better-sqlite3";
 import {
   DB_PATH, SGT, HELIUS_RPC_URL, HELIUS_API_KEY, HELIUS_API_URL,
   fetchWithRetry, rpcCall, dasCall, sleep, log, today,
 } from "../config/index.js";
+
+// Run init-db first to ensure tables exist
+execSync("node scripts/init-db.js", { stdio: "inherit" });
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
