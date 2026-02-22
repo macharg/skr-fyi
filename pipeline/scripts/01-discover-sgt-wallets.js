@@ -1,26 +1,23 @@
 // scripts/01-discover-sgt-wallets.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Discovers ALL Seeker Genesis Token holders by querying Token-2022 accounts
-// with the known SGT mint authority. Uses Helius getTokenAccounts with pagination.
+// Discovers Seeker Genesis Token holders by scanning the mint authority's
+// transaction history. Each SGT mint shows up as a TRANSFER event from the
+// mint authority. We extract the mint addresses and resolve owners via getAsset.
 //
-// Strategy:
-//   Since each SGT has a UNIQUE mint address (one per device), we can't query
-//   by a single mint. Instead, we use Helius DAS `searchAssets` with the SGT
-//   group address to find all members of the token group, OR we query
-//   getProgramAccounts on Token-2022 and filter by mint authority.
+// Strategy (proven in diagnostic testing):
+//   1. getSignaturesForAddress on the mint authority → get all mint txs
+//   2. Helius Enhanced Transaction API → extract SGT mint addresses from transfers
+//   3. getAsset on each mint → resolve current owner
+//   4. Upsert into seeker_wallets table
 //
-//   The most efficient approach is using searchAssets with grouping:
-//   - Get all assets in the SGT group (GT22s89n...)
-//   - Each result gives us the owner wallet + the SGT mint address
-//
-//   Alternative: Use getTokenAccounts with the Token-2022 program and filter
-//   by mint authority after fetching. This is more RPC-intensive.
+// On first run: scans full history (may take a while for 200K+ devices)
+// On subsequent runs: scans only new transactions since last run
 // ─────────────────────────────────────────────────────────────────────────────
 
 import Database from "better-sqlite3";
 import {
-  DB_PATH, SGT, HELIUS_RPC_URL, HELIUS_API_KEY,
-  fetchWithRetry, dasCall, sleep, log, today,
+  DB_PATH, SGT, HELIUS_RPC_URL, HELIUS_API_KEY, HELIUS_API_URL,
+  fetchWithRetry, rpcCall, dasCall, sleep, log, today,
 } from "../config/index.js";
 
 const db = new Database(DB_PATH);
@@ -33,197 +30,302 @@ const runId = db.prepare(
 
 log("Starting SGT wallet discovery...", "start");
 
-// ─── Method 1: searchAssets by group (preferred, most efficient) ─────────────
+// ─── Config ──────────────────────────────────────────────────────────────────
 
-async function discoverViaSearchAssets() {
-  const wallets = [];
-  let page = 1;
-  const limit = 1000;
+const MINT_AUTHORITY = SGT.MINT_AUTHORITY;
+const TX_BATCH_SIZE = 50;       // transactions per enhanced API call
+const ASSET_BATCH_SIZE = 100;   // getAsset calls per batch
+const MAX_PAGES = 500;          // safety limit: 500 pages × 50 txs = 25K txs per run
+const DELAY_BETWEEN_PAGES = 300; // ms between API pages
 
-  log("Using searchAssets to find all SGT group members...");
+// ─── Step 1: Get transaction signatures ──────────────────────────────────────
 
-  while (true) {
-    log(`  Fetching page ${page}...`);
+async function getAllMintSignatures() {
+  log("Step 1: Fetching mint authority transaction signatures...");
 
-    const result = await dasCall("searchAssets", {
-      grouping: ["collection", SGT.GROUP_MINT_ADDRESS],
-      page,
-      limit,
-    });
+  // Check if we have a cursor from a previous run
+  const lastSig = db.prepare(
+    `SELECT value FROM pipeline_state WHERE key = 'last_mint_sig'`
+  ).get();
 
-    if (!result?.items || result.items.length === 0) {
-      log(`  No more results at page ${page}. Done.`);
-      break;
-    }
-
-    for (const asset of result.items) {
-      const owner = asset.ownership?.owner;
-      const mint = asset.id;
-
-      if (owner && mint) {
-        wallets.push({ wallet: owner, sgtMint: mint });
-      }
-    }
-
-    log(`  Page ${page}: found ${result.items.length} SGTs (total: ${wallets.length})`);
-
-    if (result.items.length < limit) break;
-    page++;
-
-    // Respect rate limits
-    await sleep(150);
-  }
-
-  return wallets;
-}
-
-// ─── Method 2: Fallback — getProgramAccounts on Token-2022 ──────────────────
-// This is slower but doesn't depend on DAS indexing of the group.
-// It fetches all Token-2022 accounts and filters by mint authority.
-
-async function discoverViaProgramAccounts() {
-  log("Fallback: Using getProgramAccounts to scan Token-2022 program...");
-  log("⚠️  This method is slower and more RPC-intensive.");
-
-  // We query all Token-2022 token accounts and then check each mint's authority.
-  // For scale, this requires sampling or chunked processing.
-  //
-  // A production approach would use Helius webhooks or Geyser plugins to
-  // stream new SGT mints in real-time rather than scanning.
-
-  const wallets = [];
-  let cursor = null;
-  let page = 0;
-
-  while (true) {
-    page++;
-    const params = {
-      limit: 1000,
-      displayOptions: {},
-      programId: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
-    };
-    if (cursor) params.cursor = cursor;
-
-    log(`  Fetching token accounts page ${page}...`);
-
-    const result = await dasCall("getTokenAccounts", params);
-
-    if (!result?.token_accounts || result.token_accounts.length === 0) break;
-
-    // We'd need to inspect each mint account to verify it's an SGT.
-    // For now, log progress — in production, batch-fetch mint accounts
-    // and check mintAuthority === SGT.MINT_AUTHORITY
-    log(`  Page ${page}: ${result.token_accounts.length} Token-2022 accounts`);
-
-    cursor = result.cursor;
-    if (!cursor) break;
-    await sleep(200);
-  }
-
-  return wallets;
-}
-
-// ─── Method 3: Helius getAssetsByGroup (another DAS approach) ────────────────
-
-async function discoverViaGetAssetsByGroup() {
-  const wallets = [];
-  let page = 1;
-  const limit = 1000;
-
-  log("Using getAssetsByGroup to find all SGT holders...");
-
-  while (true) {
-    log(`  Fetching page ${page}...`);
-
-    const result = await dasCall("getAssetsByGroup", {
-      groupKey: "collection",
-      groupValue: SGT.GROUP_MINT_ADDRESS,
-      page,
-      limit,
-    });
-
-    if (!result?.items || result.items.length === 0) {
-      log(`  No more results. Done.`);
-      break;
-    }
-
-    for (const asset of result.items) {
-      const owner = asset.ownership?.owner;
-      const mint = asset.id;
-      if (owner && mint) {
-        wallets.push({ wallet: owner, sgtMint: mint });
-      }
-    }
-
-    log(`  Page ${page}: ${result.items.length} SGTs (cumulative: ${wallets.length})`);
-
-    if (result.items.length < limit) break;
-    page++;
-    await sleep(150);
-  }
-
-  return wallets;
-}
-
-// ─── Main Execution ──────────────────────────────────────────────────────────
-
-async function main() {
-  let wallets = [];
-
-  // Try searchAssets first, fall back to getAssetsByGroup
-  try {
-    wallets = await discoverViaSearchAssets();
-  } catch (err) {
-    log(`searchAssets failed: ${err.message}. Trying getAssetsByGroup...`, "warn");
-    try {
-      wallets = await discoverViaGetAssetsByGroup();
-    } catch (err2) {
-      log(`getAssetsByGroup also failed: ${err2.message}`, "error");
-      throw err2;
-    }
-  }
-
-  log(`Discovered ${wallets.length} SGT holders total.`);
-
-  // ─── Upsert into database ───────────────────────────────────────────────
-
-  const upsert = db.prepare(`
-    INSERT INTO seeker_wallets (wallet_address, sgt_mint_address, first_seen)
-    VALUES (?, ?, ?)
-    ON CONFLICT(wallet_address) DO UPDATE SET
-      sgt_mint_address = excluded.sgt_mint_address
+  // Create state table if needed
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pipeline_state (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT DEFAULT (datetime('now'))
+    )
   `);
 
-  const upsertMany = db.transaction((items) => {
-    let inserted = 0;
-    for (const { wallet, sgtMint } of items) {
-      const result = upsert.run(wallet, sgtMint, today());
-      if (result.changes > 0) inserted++;
+  const existingLastSig = db.prepare(
+    `SELECT value FROM pipeline_state WHERE key = 'last_mint_sig'`
+  ).get();
+
+  const signatures = [];
+  let before = undefined;
+  let page = 0;
+  let reachedKnown = false;
+
+  while (page < MAX_PAGES) {
+    page++;
+    const params = [MINT_AUTHORITY, { limit: 1000 }];
+    if (before) params[1].before = before;
+
+    try {
+      const sigs = await rpcCall("getSignaturesForAddress", params);
+
+      if (!sigs || sigs.length === 0) {
+        log(`  Page ${page}: No more signatures. Done.`);
+        break;
+      }
+
+      // Check if we've reached a previously seen signature
+      if (existingLastSig) {
+        const knownIdx = sigs.findIndex(s => s.signature === existingLastSig.value);
+        if (knownIdx >= 0) {
+          // Only include signatures before the known one
+          signatures.push(...sigs.slice(0, knownIdx));
+          log(`  Page ${page}: Reached known signature. Added ${knownIdx} new sigs.`);
+          reachedKnown = true;
+          break;
+        }
+      }
+
+      signatures.push(...sigs);
+      before = sigs[sigs.length - 1].signature;
+
+      log(`  Page ${page}: Got ${sigs.length} sigs (total: ${signatures.length})`);
+
+      if (sigs.length < 1000) {
+        log(`  End of history reached.`);
+        break;
+      }
+
+      await sleep(DELAY_BETWEEN_PAGES);
+    } catch (e) {
+      log(`  Error on page ${page}: ${e.message}`, "error");
+      break;
     }
-    return inserted;
-  });
+  }
 
-  const count = upsertMany(wallets);
-  log(`Upserted ${count} wallet records into seeker_wallets.`, "success");
+  // Save the newest signature for next run
+  if (signatures.length > 0) {
+    db.prepare(`
+      INSERT OR REPLACE INTO pipeline_state (key, value, updated_at)
+      VALUES ('last_mint_sig', ?, datetime('now'))
+    `).run(signatures[0].signature);
+  }
 
-  // Get total count
-  const totalRow = db.prepare("SELECT COUNT(*) as count FROM seeker_wallets").get();
-  log(`Total SGT holders in database: ${totalRow.count}`);
-
-  // Update pipeline run
-  db.prepare(`
-    UPDATE pipeline_runs SET finished_at = datetime('now'), status = 'success', records = ?
-    WHERE id = ?
-  `).run(wallets.length, runId);
+  log(`  Total signatures to process: ${signatures.length}`, "success");
+  return signatures;
 }
 
-main()
-  .catch((err) => {
-    log(`Fatal error: ${err.message}`, "error");
-    db.prepare(`
-      UPDATE pipeline_runs SET finished_at = datetime('now'), status = 'error', notes = ?
-      WHERE id = ?
-    `).run(err.message, runId);
-    process.exit(1);
-  })
-  .finally(() => db.close());
+// ─── Step 2: Extract SGT mints from transactions ─────────────────────────────
+
+async function extractSGTMints(signatures) {
+  log("Step 2: Parsing transactions for SGT mints...");
+
+  const sgtMints = new Map(); // mint → { owner, timestamp }
+
+  // Process in batches using Enhanced Transaction API
+  for (let i = 0; i < signatures.length; i += TX_BATCH_SIZE) {
+    const batch = signatures.slice(i, i + TX_BATCH_SIZE);
+    const batchSigs = batch.map(s => s.signature);
+
+    try {
+      const url = `https://api.helius.xyz/v0/transactions/?api-key=${HELIUS_API_KEY}`;
+      const data = await fetchWithRetry(url, {
+        method: "POST",
+        body: JSON.stringify({ transactions: batchSigs }),
+      });
+
+      if (data && Array.isArray(data)) {
+        for (const tx of data) {
+          // Look for token transfers — these are SGT mints/transfers
+          if (tx.tokenTransfers) {
+            for (const tt of tx.tokenTransfers) {
+              if (tt.mint &&
+                  tt.tokenAmount === 1 &&
+                  tt.mint !== "So11111111111111111111111111111111111111112") {
+                sgtMints.set(tt.mint, {
+                  toWallet: tt.toUserAccount,
+                  timestamp: tx.timestamp,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      const progress = Math.min(i + TX_BATCH_SIZE, signatures.length);
+      if (progress % (TX_BATCH_SIZE * 5) === 0 || progress === signatures.length) {
+        log(`  Progress: ${progress}/${signatures.length} txs → ${sgtMints.size} SGT mints found`);
+      }
+
+      await sleep(DELAY_BETWEEN_PAGES);
+    } catch (e) {
+      log(`  Error parsing batch at offset ${i}: ${e.message}`, "warn");
+      await sleep(1000);
+    }
+  }
+
+  log(`  Discovered ${sgtMints.size} unique SGT mint addresses`, "success");
+  return sgtMints;
+}
+
+// ─── Step 3: Resolve current owners via getAsset ─────────────────────────────
+
+async function resolveOwners(sgtMints) {
+  log("Step 3: Resolving current wallet owners...");
+
+  const mintEntries = Array.from(sgtMints.entries());
+  const wallets = [];
+
+  for (let i = 0; i < mintEntries.length; i += ASSET_BATCH_SIZE) {
+    const batch = mintEntries.slice(i, i + ASSET_BATCH_SIZE);
+
+    // Use getAssetBatch for efficiency (up to 1000 at a time)
+    const ids = batch.map(([mint]) => mint);
+
+    try {
+      const res = await fetchWithRetry(HELIUS_RPC_URL, {
+        method: "POST",
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getAssetBatch",
+          params: { ids },
+        }),
+      });
+
+      if (res.result && Array.isArray(res.result)) {
+        for (const asset of res.result) {
+          if (asset && asset.ownership?.owner) {
+            wallets.push({
+              wallet: asset.ownership.owner,
+              sgtMint: asset.id,
+              frozen: asset.ownership.frozen,
+            });
+          }
+        }
+      }
+    } catch (e) {
+      // Fallback: individual getAsset calls
+      log(`  Batch failed, falling back to individual calls: ${e.message}`, "warn");
+      for (const [mint, info] of batch) {
+        try {
+          const res = await fetchWithRetry(HELIUS_RPC_URL, {
+            method: "POST",
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "getAsset",
+              params: { id: mint },
+            }),
+          });
+          if (res.result?.ownership?.owner) {
+            wallets.push({
+              wallet: res.result.ownership.owner,
+              sgtMint: mint,
+            });
+          }
+        } catch (e2) {
+          // Skip failed individual lookups
+        }
+        await sleep(50);
+      }
+    }
+
+    const progress = Math.min(i + ASSET_BATCH_SIZE, mintEntries.length);
+    if (progress % (ASSET_BATCH_SIZE * 5) === 0 || progress === mintEntries.length) {
+      log(`  Progress: ${progress}/${mintEntries.length} → ${wallets.length} wallets resolved`);
+    }
+
+    await sleep(DELAY_BETWEEN_PAGES);
+  }
+
+  log(`  Resolved ${wallets.length} wallet owners`, "success");
+  return wallets;
+}
+
+// ─── Step 4: Upsert into database ───────────────────────────────────────────
+
+function saveWallets(wallets) {
+  log("Step 4: Saving to database...");
+
+  const upsert = db.prepare(`
+    INSERT INTO seeker_wallets (wallet_address, sgt_mint_address, first_seen, is_active)
+    VALUES (?, ?, date('now'), 1)
+    ON CONFLICT(wallet_address) DO UPDATE SET
+      sgt_mint_address = excluded.sgt_mint_address,
+      is_active = 1
+  `);
+
+  const insertMany = db.transaction((list) => {
+    let inserted = 0;
+    let updated = 0;
+    for (const w of list) {
+      const result = upsert.run(w.wallet, w.sgtMint);
+      if (result.changes > 0) {
+        if (result.changes === 1) inserted++;
+        else updated++;
+      }
+    }
+    return { inserted, updated };
+  });
+
+  const { inserted, updated } = insertMany(wallets);
+
+  const total = db.prepare(`SELECT COUNT(*) as count FROM seeker_wallets`).get();
+
+  log(`  New: ${inserted}, Updated: ${updated}, Total in DB: ${total.count}`, "success");
+  return total.count;
+}
+
+// ─── Main ────────────────────────────────────────────────────────────────────
+
+async function main() {
+  try {
+    // Verify connectivity
+    const slot = await rpcCall("getSlot", []);
+    log(`Connected to Solana (slot: ${slot})`);
+
+    // Step 1: Get signatures
+    const signatures = await getAllMintSignatures();
+
+    if (signatures.length === 0) {
+      log("No new transactions found. Database is up to date.", "success");
+      db.prepare(`UPDATE pipeline_runs SET status = 'success', ended_at = datetime('now') WHERE id = ?`).run(runId);
+      db.close();
+      return;
+    }
+
+    // Step 2: Extract SGT mints
+    const sgtMints = await extractSGTMints(signatures);
+
+    if (sgtMints.size === 0) {
+      log("No SGT mints found in transactions.", "warn");
+      db.prepare(`UPDATE pipeline_runs SET status = 'success', ended_at = datetime('now') WHERE id = ?`).run(runId);
+      db.close();
+      return;
+    }
+
+    // Step 3: Resolve owners
+    const wallets = await resolveOwners(sgtMints);
+
+    // Step 4: Save to DB
+    const totalWallets = saveWallets(wallets);
+
+    // Done
+    db.prepare(`UPDATE pipeline_runs SET status = 'success', ended_at = datetime('now') WHERE id = ?`).run(runId);
+    log(`Discovery complete! ${totalWallets} total Seeker wallets in database.`, "success");
+  } catch (e) {
+    log(`Fatal error: ${e.message}`, "error");
+    console.error(e.stack);
+    db.prepare(`UPDATE pipeline_runs SET status = 'error', ended_at = datetime('now') WHERE id = ?`).run(runId);
+  } finally {
+    db.close();
+  }
+}
+
+main();
