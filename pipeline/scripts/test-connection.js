@@ -1,17 +1,15 @@
-// scripts/test-connection.js — Diagnostic v2: find SGT wallets
+// scripts/test-connection.js — v3: Discover SGTs via mint authority transactions
 import { config } from "dotenv";
 config();
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const SGT_MINT_AUTHORITY = "GT2zuHVaZQYZSyQMgJPLzvkmyztfyXg2NJunqFp4p3A4";
-const SGT_GROUP_MINT = "GT22s89nU4iWFkNXj1Bw6uYhJJWDRPpShHt4Bk8f99Te";
-const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 console.log("=================================================");
-console.log("  skr.fyi Pipeline Diagnostic v2");
+console.log("  skr.fyi — SGT Wallet Discovery v3");
 console.log("=================================================");
-console.log(`  Time:    ${new Date().toISOString()}`);
+console.log(`  Time: ${new Date().toISOString()}`);
 console.log(`  API Key: ${HELIUS_API_KEY ? HELIUS_API_KEY.slice(0, 8) + "..." : "MISSING!"}`);
 console.log("");
 
@@ -31,133 +29,59 @@ async function rpcCall(method, params) {
   return data.result;
 }
 
-// ── Test 1: Basic connectivity ───────────────────────────────────────────────
-async function test1() {
-  console.log("TEST 1: RPC Connection");
+// Step 1: Get recent transaction signatures for the mint authority
+async function getRecentMintTxs(limit = 20) {
+  console.log(`STEP 1: Fetching last ${limit} transactions for mint authority...`);
   try {
-    const slot = await rpcCall("getSlot", []);
-    console.log(`  ✅ Connected! Slot: ${slot}`);
-  } catch (e) {
-    console.error(`  ❌ ${e.message}`);
-    process.exit(1);
-  }
-}
-
-// ── Test 2: Verify SGT group mint exists ─────────────────────────────────────
-async function test2() {
-  console.log("\nTEST 2: SGT Group Mint");
-  try {
-    const info = await rpcCall("getAccountInfo", [SGT_GROUP_MINT, { encoding: "jsonParsed" }]);
-    if (info?.value) {
-      console.log(`  ✅ Exists! Owner: ${info.value.owner}`);
-    } else {
-      console.log("  ⚠️ Not found");
+    const sigs = await rpcCall("getSignaturesForAddress", [
+      SGT_MINT_AUTHORITY,
+      { limit },
+    ]);
+    console.log(`  ✅ Found ${sigs.length} transactions`);
+    if (sigs.length > 0) {
+      console.log(`  Latest: ${sigs[0].signature.slice(0, 20)}... (${new Date(sigs[0].blockTime * 1000).toISOString()})`);
+      console.log(`  Oldest: ${sigs[sigs.length - 1].signature.slice(0, 20)}... (${new Date(sigs[sigs.length - 1].blockTime * 1000).toISOString()})`);
     }
+    return sigs;
   } catch (e) {
     console.error(`  ❌ ${e.message}`);
+    return [];
   }
 }
 
-// ── Test 3: Check a known SGT mint from the docs ────────────────────────────
-async function test3() {
-  console.log("\nTEST 3: Known SGT Sample (from Solana Mobile docs)");
-  const knownSGT = "5mXbkqKz883aufhAsx3p5Z1NcvD2ppZbdTTznM6oUKLj";
+// Step 2: Parse a transaction to extract mint address and owner
+async function parseMintTx(signature) {
   try {
-    const info = await rpcCall("getAccountInfo", [knownSGT, { encoding: "jsonParsed" }]);
-    if (info?.value) {
-      console.log(`  ✅ Known SGT exists!`);
-      console.log(`  Owner program: ${info.value.owner}`);
-      const parsed = info.value.data?.parsed;
-      if (parsed?.info) {
-        console.log(`  Mint authority: ${parsed.info.mintAuthority || "none"}`);
-        console.log(`  Supply: ${parsed.info.supply}`);
-        console.log(`  Decimals: ${parsed.info.decimals}`);
-      }
-    } else {
-      console.log("  ⚠️ Not found");
-    }
-  } catch (e) {
-    console.error(`  ❌ ${e.message}`);
-  }
-}
-
-// ── Test 4: Use searchAssets with authority ──────────────────────────────────
-async function test4() {
-  console.log("\nTEST 4: searchAssets by authority");
-  try {
-    const res = await fetch(HELIUS_RPC_URL, {
+    // Use Helius enhanced transaction parsing
+    const url = `https://api.helius.xyz/v0/transactions/?api-key=${HELIUS_API_KEY}`;
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "searchAssets",
-        params: {
-          authorityAddress: SGT_MINT_AUTHORITY,
-          page: 1,
-          limit: 5,
-        },
-      }),
+      body: JSON.stringify({ transactions: [signature] }),
     });
     const data = await res.json();
-    if (data.error) {
-      console.log(`  ⚠️ Error: ${JSON.stringify(data.error)}`);
-    } else if (data.result?.items?.length > 0) {
-      console.log(`  ✅ Found ${data.result.total} assets!`);
-      data.result.items.forEach((item, i) => {
-        console.log(`    ${i + 1}. ${item.id} → owner: ${item.ownership?.owner?.slice(0, 16)}...`);
-      });
-      return data.result.items;
-    } else {
-      console.log(`  Found 0 assets. Full response: ${JSON.stringify(data.result).slice(0, 200)}`);
+
+    if (data && data.length > 0) {
+      const tx = data[0];
+      return {
+        signature: signature.slice(0, 16) + "...",
+        type: tx.type,
+        description: tx.description?.slice(0, 100),
+        timestamp: tx.timestamp ? new Date(tx.timestamp * 1000).toISOString() : "unknown",
+        // Look for token transfers or mints
+        tokenTransfers: tx.tokenTransfers || [],
+        accountData: tx.accountData?.slice(0, 3) || [],
+      };
     }
+    return null;
   } catch (e) {
-    console.error(`  ❌ ${e.message}`);
+    console.error(`  Error parsing tx: ${e.message}`);
+    return null;
   }
-  return null;
 }
 
-// ── Test 5: Use getAssetsByGroup ─────────────────────────────────────────────
-async function test5() {
-  console.log("\nTEST 5: getAssetsByGroup");
-  try {
-    const res = await fetch(HELIUS_RPC_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "getAssetsByGroup",
-        params: {
-          groupKey: "collection",
-          groupValue: SGT_GROUP_MINT,
-          page: 1,
-          limit: 5,
-        },
-      }),
-    });
-    const data = await res.json();
-    if (data.error) {
-      console.log(`  ⚠️ Error: ${JSON.stringify(data.error)}`);
-    } else if (data.result?.items?.length > 0) {
-      console.log(`  ✅ Found ${data.result.total} assets!`);
-      data.result.items.forEach((item, i) => {
-        console.log(`    ${i + 1}. ${item.id} → owner: ${item.ownership?.owner?.slice(0, 16)}...`);
-      });
-      return data.result.items;
-    } else {
-      console.log(`  Found 0 assets. Response: ${JSON.stringify(data.result).slice(0, 200)}`);
-    }
-  } catch (e) {
-    console.error(`  ❌ ${e.message}`);
-  }
-  return null;
-}
-
-// ── Test 6: Look up the known SGT via getAsset ──────────────────────────────
-async function test6() {
-  console.log("\nTEST 6: getAsset for known SGT");
-  const knownSGT = "5mXbkqKz883aufhAsx3p5Z1NcvD2ppZbdTTznM6oUKLj";
+// Step 3: Use getAsset to get owner of an SGT mint
+async function getAssetOwner(mintAddress) {
   try {
     const res = await fetch(HELIUS_RPC_URL, {
       method: "POST",
@@ -166,92 +90,119 @@ async function test6() {
         jsonrpc: "2.0",
         id: 1,
         method: "getAsset",
-        params: { id: knownSGT },
+        params: { id: mintAddress },
       }),
     });
     const data = await res.json();
-    if (data.error) {
-      console.log(`  ⚠️ Error: ${JSON.stringify(data.error)}`);
-    } else if (data.result) {
-      const r = data.result;
-      console.log(`  ✅ Asset found!`);
-      console.log(`  Name: ${r.content?.metadata?.name || "unknown"}`);
-      console.log(`  Owner: ${r.ownership?.owner}`);
-      console.log(`  Frozen: ${r.ownership?.frozen}`);
-      console.log(`  Interface: ${r.interface}`);
-      console.log(`  Token standard: ${r.content?.metadata?.token_standard}`);
-      if (r.grouping?.length > 0) {
-        r.grouping.forEach(g => {
-          console.log(`  Group: ${g.group_key} = ${g.group_value}`);
-        });
-      }
-      if (r.authorities?.length > 0) {
-        r.authorities.forEach(a => {
-          console.log(`  Authority: ${a.address} (scopes: ${a.scopes?.join(",")})`);
-        });
-      }
-      return r;
+    if (data.result) {
+      return {
+        mint: mintAddress,
+        owner: data.result.ownership?.owner,
+        frozen: data.result.ownership?.frozen,
+        name: data.result.content?.metadata?.name,
+      };
     }
+    return null;
   } catch (e) {
-    console.error(`  ❌ ${e.message}`);
+    return null;
   }
-  return null;
 }
 
-// ── Test 7: Try getAssetsByAuthority ─────────────────────────────────────────
-async function test7() {
-  console.log("\nTEST 7: getAssetsByAuthority");
+// Step 4: Alternative — use Helius parsed transaction history
+async function getEnhancedHistory() {
+  console.log(`\nSTEP 2: Using Helius Enhanced Transaction API...`);
   try {
-    const res = await fetch(HELIUS_RPC_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "getAssetsByAuthority",
-        params: {
-          authorityAddress: SGT_MINT_AUTHORITY,
-          page: 1,
-          limit: 5,
-        },
-      }),
-    });
+    const url = `https://api.helius.xyz/v0/addresses/${SGT_MINT_AUTHORITY}/transactions?api-key=${HELIUS_API_KEY}&limit=10`;
+    const res = await fetch(url);
     const data = await res.json();
-    if (data.error) {
-      console.log(`  ⚠️ Error: ${JSON.stringify(data.error)}`);
-    } else if (data.result?.items?.length > 0) {
-      console.log(`  ✅ Found ${data.result.total} assets by authority!`);
-      data.result.items.forEach((item, i) => {
-        console.log(`    ${i + 1}. ${item.id} → owner: ${item.ownership?.owner?.slice(0, 16)}...`);
-      });
-      return data.result.items;
+
+    if (data && data.length > 0) {
+      console.log(`  ✅ Got ${data.length} enhanced transactions`);
+
+      const sgtMints = new Set();
+
+      for (const tx of data) {
+        console.log(`\n  TX: ${tx.signature?.slice(0, 16)}...`);
+        console.log(`    Type: ${tx.type}`);
+        console.log(`    Time: ${tx.timestamp ? new Date(tx.timestamp * 1000).toISOString() : "unknown"}`);
+        console.log(`    Description: ${tx.description?.slice(0, 120) || "none"}`);
+
+        // Check token transfers for minted SGTs
+        if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
+          console.log(`    Token transfers: ${tx.tokenTransfers.length}`);
+          for (const tt of tx.tokenTransfers) {
+            console.log(`      Mint: ${tt.mint} → To: ${tt.toUserAccount?.slice(0, 16)}... Amount: ${tt.tokenAmount}`);
+            if (tt.mint && tt.mint !== "So11111111111111111111111111111111111111112") {
+              sgtMints.add(tt.mint);
+            }
+          }
+        }
+
+        // Check account data for new accounts
+        if (tx.accountData && tx.accountData.length > 0) {
+          const newAccounts = tx.accountData.filter(a => a.nativeBalanceChange > 0);
+          if (newAccounts.length > 0) {
+            console.log(`    New accounts: ${newAccounts.length}`);
+          }
+        }
+      }
+
+      return sgtMints;
     } else {
-      console.log(`  Found 0 assets. Response: ${JSON.stringify(data.result).slice(0, 200)}`);
+      console.log(`  ⚠️ No transactions returned. Response: ${JSON.stringify(data).slice(0, 200)}`);
     }
   } catch (e) {
     console.error(`  ❌ ${e.message}`);
   }
-  return null;
+  return new Set();
 }
 
-// ── Run all ──────────────────────────────────────────────────────────────────
-async function main() {
-  await test1();
-  await test2();
-  await test3();
-  const t4 = await test4();
-  const t5 = await test5();
-  const t6 = await test6();
-  const t7 = await test7();
+// Step 5: Look up discovered SGT owners
+async function lookupOwners(mintAddresses) {
+  console.log(`\nSTEP 3: Looking up owners for ${mintAddresses.size} discovered SGT mints...`);
+  const wallets = [];
 
-  console.log("\n=================================================");
-  console.log("  Summary");
-  console.log("=================================================");
-  console.log(`  searchAssets by authority: ${t4 ? "✅ found " + t4.length : "❌ none"}`);
-  console.log(`  getAssetsByGroup:         ${t5 ? "✅ found " + t5.length : "❌ none"}`);
-  console.log(`  getAsset (known SGT):     ${t6 ? "✅ found" : "❌ none"}`);
-  console.log(`  getAssetsByAuthority:     ${t7 ? "✅ found " + t7.length : "❌ none"}`);
-  console.log("=================================================");
+  for (const mint of mintAddresses) {
+    const asset = await getAssetOwner(mint);
+    if (asset) {
+      console.log(`  ✅ ${mint.slice(0, 16)}... → Owner: ${asset.owner?.slice(0, 16)}... (${asset.name})`);
+      wallets.push(asset);
+    } else {
+      console.log(`  ⚠️ ${mint.slice(0, 16)}... → Could not resolve`);
+    }
+  }
+
+  return wallets;
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+async function main() {
+  // Verify connectivity
+  const slot = await rpcCall("getSlot", []);
+  console.log(`Connected to Solana! Slot: ${slot}\n`);
+
+  // Get recent txs from mint authority
+  await getRecentMintTxs(10);
+
+  // Get enhanced transaction history
+  const sgtMints = await getEnhancedHistory();
+
+  // Look up owners
+  if (sgtMints.size > 0) {
+    const wallets = await lookupOwners(sgtMints);
+    console.log(`\n=================================================`);
+    console.log(`  RESULTS: Found ${wallets.length} SGT wallets!`);
+    console.log(`=================================================`);
+    wallets.forEach((w, i) => {
+      console.log(`  ${i + 1}. ${w.owner}`);
+    });
+  } else {
+    console.log(`\n=================================================`);
+    console.log(`  No SGT mints found in recent transactions.`);
+    console.log(`  The mint authority may not have recent activity,`);
+    console.log(`  or we need to paginate further back.`);
+    console.log(`=================================================`);
+  }
 }
 
 main().catch(e => {
